@@ -1,4 +1,4 @@
-use super::File;
+use super::{File, Stat};
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
 use alloc::sync::{Arc, Weak};
@@ -175,5 +175,8 @@ impl File for Pipe {
                 }
             }
         }
+    }
+    fn stat(&self) -> Stat {
+        Stat::special()
     }
 }

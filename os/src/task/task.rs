@@ -7,6 +7,13 @@ use crate::{mm::PhysPageNum, sync::UPSafeCell};
 use alloc::sync::{Arc, Weak};
 use core::cell::RefMut;
 
+const BIG_STRIDE: usize = 1 << 32;
+
+/// Convert a user priority into a stride; larger priorities get smaller strides.
+pub fn priority_to_stride(priority: isize) -> usize {
+    (BIG_STRIDE / priority as usize).max(1)
+}
+
 /// Task control block structure
 pub struct TaskControlBlock {
     /// immutable
@@ -41,6 +48,15 @@ pub struct TaskControlBlockInner {
     pub task_status: TaskStatus,
     /// It is set when active exit or execution error occurs
     pub exit_code: Option<i32>,
+
+    /// Scheduling priority.
+    pub priority: isize,
+
+    /// Amount added to `pass` after one scheduling turn.
+    pub stride: usize,
+
+    /// Virtual runtime used by stride scheduling.
+    pub pass: usize,
 }
 
 impl TaskControlBlockInner {
@@ -75,6 +91,9 @@ impl TaskControlBlock {
                     task_cx: TaskContext::goto_trap_return(kstack_top),
                     task_status: TaskStatus::Ready,
                     exit_code: None,
+                    priority: 16,
+                    stride: priority_to_stride(16),
+                    pass: 0,
                 })
             },
         }
