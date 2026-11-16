@@ -63,6 +63,42 @@ impl MemorySet {
             None,
         );
     }
+    /// Try to map a new non-overlapping user area.
+    pub fn mmap(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        if start_vpn >= end_vpn {
+            return false;
+        }
+        if self.areas.iter().any(|area| {
+            area.vpn_range.get_start() < end_vpn && start_vpn < area.vpn_range.get_end()
+        }) {
+            return false;
+        }
+        self.push(
+            MapArea::new(start_va, end_va, MapType::Framed, permission),
+            None,
+        );
+        true
+    }
+    /// Unmap an area only when the requested range exactly matches it.
+    pub fn munmap(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        let Some(index) = self.areas.iter().position(|area| {
+            area.vpn_range.get_start() == start_vpn && area.vpn_range.get_end() == end_vpn
+        }) else {
+            return false;
+        };
+        let mut area = self.areas.remove(index);
+        area.unmap(&mut self.page_table);
+        true
+    }
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {

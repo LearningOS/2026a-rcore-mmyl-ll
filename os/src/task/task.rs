@@ -1,6 +1,6 @@
 //! Types related to task management
 use super::TaskContext;
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::mm::{
     kernel_stack_position, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE,
 };
@@ -28,6 +28,9 @@ pub struct TaskControlBlock {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Number of calls made by this task for each syscall id.
+    pub syscall_count: [usize; MAX_SYSCALL_NUM],
 }
 
 impl TaskControlBlock {
@@ -63,6 +66,7 @@ impl TaskControlBlock {
             base_size: user_sp,
             heap_bottom: user_sp,
             program_brk: user_sp,
+            syscall_count: [0; MAX_SYSCALL_NUM],
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.get_trap_cx();
@@ -95,6 +99,34 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+    /// Record one syscall call by this task.
+    pub fn increment_syscall_count(&mut self, syscall_id: usize) {
+        if let Some(count) = self.syscall_count.get_mut(syscall_id) {
+            *count += 1;
+        }
+    }
+
+    /// Get this task's syscall call count.
+    pub fn get_syscall_count(&self, syscall_id: usize) -> usize {
+        self.syscall_count.get(syscall_id).copied().unwrap_or(0)
+    }
+
+    /// Map a user memory area.
+    pub fn mmap(&mut self, start: usize, len: usize, permission: MapPermission) -> bool {
+        let Some(end) = start.checked_add(len) else {
+            return false;
+        };
+        self.memory_set.mmap(start.into(), end.into(), permission)
+    }
+
+    /// Unmap a user memory area.
+    pub fn munmap(&mut self, start: usize, len: usize) -> bool {
+        let Some(end) = start.checked_add(len) else {
+            return false;
+        };
+        self.memory_set.munmap(start.into(), end.into())
     }
 }
 
