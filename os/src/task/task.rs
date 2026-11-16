@@ -2,12 +2,19 @@
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::TRAP_CONTEXT_BASE;
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
+
+const BIG_STRIDE: usize = 1 << 32;
+
+/// Convert a user priority into a stride; larger priorities get smaller strides.
+pub fn priority_to_stride(priority: isize) -> usize {
+    (BIG_STRIDE / priority as usize).max(1)
+}
 
 /// Task control block structure
 ///
@@ -68,6 +75,15 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Scheduling priority. Larger values are scheduled first.
+    pub priority: isize,
+
+    /// Amount added to `pass` after one scheduling turn.
+    pub stride: usize,
+
+    /// Virtual runtime used by stride scheduling.
+    pub pass: usize,
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +134,9 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: 16,
+                    stride: priority_to_stride(16),
+                    pass: 0,
                 })
             },
         };
@@ -150,6 +169,9 @@ impl TaskControlBlock {
         inner.trap_cx_ppn = trap_cx_ppn;
         // initialize base_size
         inner.base_size = user_sp;
+        // reset the heap after replacing the address space
+        inner.heap_bottom = user_sp;
+        inner.program_brk = user_sp;
         // initialize trap_cx
         let trap_cx = inner.get_trap_cx();
         *trap_cx = TrapContext::app_init_context(
@@ -191,6 +213,9 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: parent_inner.priority,
+                    stride: parent_inner.stride,
+                    pass: parent_inner.pass,
                 })
             },
         });
@@ -235,6 +260,26 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+    /// Map a user memory area.
+    pub fn mmap(&self, start: usize, len: usize, permission: MapPermission) -> bool {
+        let Some(end) = start.checked_add(len) else {
+            return false;
+        };
+        self.inner_exclusive_access()
+            .memory_set
+            .mmap(start.into(), end.into(), permission)
+    }
+
+    /// Unmap a user memory area.
+    pub fn munmap(&self, start: usize, len: usize) -> bool {
+        let Some(end) = start.checked_add(len) else {
+            return false;
+        };
+        self.inner_exclusive_access()
+            .memory_set
+            .munmap(start.into(), end.into())
     }
 }
 

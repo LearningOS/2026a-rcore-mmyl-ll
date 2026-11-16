@@ -17,13 +17,23 @@ impl TaskManager {
             ready_queue: VecDeque::new(),
         }
     }
-    /// Add process back to ready queue
+    /// Add a process to the ready queue.
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
         self.ready_queue.push_back(task);
     }
-    /// Take a process out of the ready queue
+    /// Take the process with the smallest pass out of the ready queue.
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        let index = self
+            .ready_queue
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, task)| task.inner_exclusive_access().pass)
+            .map(|(index, _)| index)?;
+        let task = self.ready_queue.remove(index)?;
+        let mut inner = task.inner_exclusive_access();
+        inner.pass = inner.pass.saturating_add(inner.stride);
+        drop(inner);
+        Some(task)
     }
 }
 
