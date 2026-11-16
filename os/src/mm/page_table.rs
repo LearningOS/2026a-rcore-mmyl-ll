@@ -5,6 +5,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
 
+const USER_VA_END: usize = 0x8000_0000;
+
 bitflags! {
     /// page table entry flags
     pub struct PTEFlags: u8 {
@@ -158,16 +160,27 @@ impl PageTable {
     }
 }
 
-/// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
-pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
+/// Translate a possibly cross-page user buffer for reading.
+pub fn translated_byte_buffer(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+) -> Option<Vec<&'static mut [u8]>> {
     let page_table = PageTable::from_token(token);
     let mut start = ptr as usize;
-    let end = start + len;
+    let end = start.checked_add(len)?;
+    if start >= USER_VA_END || end > USER_VA_END {
+        return None;
+    }
     let mut v = Vec::new();
     while start < end {
         let start_va = VirtAddr::from(start);
         let mut vpn = start_va.floor();
-        let ppn = page_table.translate(vpn).unwrap().ppn();
+        let pte = page_table.translate(vpn)?;
+        if !pte.is_valid() || !pte.readable() {
+            return None;
+        }
+        let ppn = pte.ppn();
         vpn.step();
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
@@ -178,26 +191,87 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         }
         start = end_va.into();
     }
-    v
+    Some(v)
 }
 
-/// Translate&Copy a ptr[u8] array end with `\0` to a `String` Vec through page table
-pub fn translated_str(token: usize, ptr: *const u8) -> String {
+/// Translate a possibly cross-page user buffer for writing.
+pub fn translated_byte_buffer_mut(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+) -> Option<Vec<&'static mut [u8]>> {
+    let page_table = PageTable::from_token(token);
+    let mut start = ptr as usize;
+    let end = start.checked_add(len)?;
+    if start >= USER_VA_END || end > USER_VA_END {
+        return None;
+    }
+    let mut v = Vec::new();
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let mut vpn = start_va.floor();
+        let pte = page_table.translate(vpn)?;
+        if !pte.is_valid() || !pte.writable() {
+            return None;
+        }
+        let ppn = pte.ppn();
+        vpn.step();
+        let mut end_va: VirtAddr = vpn.into();
+        end_va = end_va.min(VirtAddr::from(end));
+        if end_va.page_offset() == 0 {
+            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..]);
+        } else {
+            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..end_va.page_offset()]);
+        }
+        start = end_va.into();
+    }
+    Some(v)
+}
+
+/// Copy a user buffer into a kernel buffer.
+pub fn copy_from_user(token: usize, ptr: *const u8, data: &mut [u8]) -> bool {
+    let Some(buffers) = translated_byte_buffer(token, ptr, data.len()) else {
+        return false;
+    };
+    let mut copied = 0;
+    for buffer in buffers {
+        data[copied..copied + buffer.len()].copy_from_slice(buffer);
+        copied += buffer.len();
+    }
+    true
+}
+
+/// Copy a kernel buffer into a user buffer.
+pub fn copy_to_user(token: usize, ptr: *mut u8, data: &[u8]) -> bool {
+    let Some(buffers) = translated_byte_buffer_mut(token, ptr, data.len()) else {
+        return false;
+    };
+    let mut copied = 0;
+    for buffer in buffers {
+        let len = buffer.len();
+        buffer.copy_from_slice(&data[copied..copied + len]);
+        copied += len;
+    }
+    true
+}
+
+/// Translate a null-terminated user string.
+pub fn translated_str(token: usize, ptr: *const u8) -> Option<String> {
     let page_table = PageTable::from_token(token);
     let mut string = String::new();
     let mut va = ptr as usize;
     loop {
-        let ch: u8 = *(page_table
-            .translate_va(VirtAddr::from(va))
-            .unwrap()
-            .get_mut());
+        if va >= USER_VA_END {
+            return None;
+        }
+        let ch: u8 = *(page_table.translate_va(VirtAddr::from(va))?.get_mut());
         if ch == 0 {
             break;
         }
         string.push(ch as char);
         va += 1;
     }
-    string
+    Some(string)
 }
 
 #[allow(unused)]
