@@ -17,11 +17,16 @@ mod task;
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
+
+const SYSCALL_COUNT_LEN: usize = 512;
+static SYSCALL_COUNTS: [[AtomicUsize; SYSCALL_COUNT_LEN]; MAX_APP_NUM] =
+    [const { [const { AtomicUsize::new(0) }; SYSCALL_COUNT_LEN] }; MAX_APP_NUM];
 
 /// The task manager, where all the tasks are managed.
 ///
@@ -135,6 +140,24 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// Record one call of `syscall_id` by the current task.
+    fn increment_current_syscall_count(&self, syscall_id: usize) {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        if let Some(count) = SYSCALL_COUNTS[current].get(syscall_id) {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Get the number of calls for `syscall_id` made by the current task.
+    fn current_syscall_count(&self, syscall_id: usize) -> usize {
+        let inner = self.inner.exclusive_access();
+        SYSCALL_COUNTS[inner.current_task]
+            .get(syscall_id)
+            .map(|count| count.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +191,14 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Record a syscall call for the current task.
+pub fn increment_current_syscall_count(syscall_id: usize) {
+    TASK_MANAGER.increment_current_syscall_count(syscall_id);
+}
+
+/// Get the current task's call count for a syscall id.
+pub fn current_syscall_count(syscall_id: usize) -> usize {
+    TASK_MANAGER.current_syscall_count(syscall_id)
 }
