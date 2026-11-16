@@ -11,8 +11,8 @@
 
 mod action;
 mod context;
-mod manager;
 mod id;
+mod manager;
 mod processor;
 mod signal;
 mod switch;
@@ -26,11 +26,11 @@ use lazy_static::*;
 use manager::fetch_task;
 use manager::remove_from_pid2task;
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
+pub use task::{priority_to_stride, TaskControlBlock, TaskStatus};
 
 pub use action::{SignalAction, SignalActions};
-pub use manager::{add_task, pid2task};
 pub use id::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
+pub use manager::{add_task, pid2task};
 pub use processor::{
     current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
 };

@@ -1,10 +1,12 @@
 //! Types related to task management & Functions for completely changing TCB
 
-use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
+use super::{
+    kstack_alloc, pid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext,
+};
 use crate::{
     config::TRAP_CONTEXT_BASE,
     fs::{File, Stdin, Stdout},
-    mm::{translated_refmut, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE},
+    mm::{translated_refmut, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE},
     sync::UPSafeCell,
     trap::{trap_handler, TrapContext},
 };
@@ -15,6 +17,13 @@ use alloc::{
     vec::Vec,
 };
 use core::cell::RefMut;
+
+const BIG_STRIDE: usize = 1 << 32;
+
+/// Convert a user priority into a stride; larger priorities get smaller strides.
+pub fn priority_to_stride(priority: isize) -> usize {
+    (BIG_STRIDE / priority as usize).max(1)
+}
 
 /// Task control block structure
 ///
@@ -87,6 +96,15 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Scheduling priority.
+    pub priority: isize,
+
+    /// Amount added to `pass` after one scheduling turn.
+    pub stride: usize,
+
+    /// Virtual runtime used by stride scheduling.
+    pub pass: usize,
 }
 
 impl TaskControlBlockInner {
@@ -158,6 +176,9 @@ impl TaskControlBlock {
                     trap_ctx_backup: None,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: 16,
+                    stride: priority_to_stride(16),
+                    pass: 0,
                 })
             },
         };
@@ -177,6 +198,7 @@ impl TaskControlBlock {
     pub fn exec(&self, elf_data: &[u8], args: Vec<String>) {
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (memory_set, mut user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let heap_bottom = user_sp;
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
@@ -212,6 +234,10 @@ impl TaskControlBlock {
         inner.memory_set = memory_set;
         // update trap_cx ppn
         inner.trap_cx_ppn = trap_cx_ppn;
+        // initialize the new address space's heap
+        inner.base_size = heap_bottom;
+        inner.heap_bottom = heap_bottom;
+        inner.program_brk = heap_bottom;
         // initialize trap_cx
         let mut trap_cx = TrapContext::app_init_context(
             entry_point,
@@ -273,6 +299,9 @@ impl TaskControlBlock {
                     trap_ctx_backup: None,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: parent_inner.priority,
+                    stride: parent_inner.stride,
+                    pass: parent_inner.pass,
                 })
             },
         });
@@ -317,6 +346,26 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+    /// Map a user memory area.
+    pub fn mmap(&self, start: usize, len: usize, permission: MapPermission) -> bool {
+        let Some(end) = start.checked_add(len) else {
+            return false;
+        };
+        self.inner_exclusive_access()
+            .memory_set
+            .mmap(start.into(), end.into(), permission)
+    }
+
+    /// Unmap a user memory area.
+    pub fn munmap(&self, start: usize, len: usize) -> bool {
+        let Some(end) = start.checked_add(len) else {
+            return false;
+        };
+        self.inner_exclusive_access()
+            .memory_set
+            .munmap(start.into(), end.into())
     }
 }
 
